@@ -8,7 +8,6 @@ import torch.nn as nn
 import plotly.graph_objects as go
 import plotly.express as px
 
-# --- LIBRARY 15 MODEL PILIHAN ---
 from xgboost import XGBClassifier
 from sklearn.svm import SVC
 from sklearn.neural_network import MLPClassifier
@@ -21,7 +20,6 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
-# --- 1. KONFIGURASI HALAMAN ---
 st.set_page_config(
     layout="wide", 
     page_title="Infinity Sniper: Entry & Exit", 
@@ -30,7 +28,6 @@ st.set_page_config(
 )
 DB_NAME = "market_data.db"
 
-# --- 2. CUSTOM CSS ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
@@ -62,7 +59,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. DATA ENGINE ---
 def get_all_tickers():
     conn = sqlite3.connect(DB_NAME)
     try:
@@ -83,7 +79,6 @@ def get_data(ticker):
         df['date'] = pd.to_datetime(df['date'])
         df.set_index('date', inplace=True)
         
-        # Data Cleaning
         cols = ['open', 'high', 'low', 'close', 'volume']
         for c in cols:
             if c in df.columns:
@@ -100,7 +95,6 @@ def rekayasa_fitur(df):
     """ ⚔️ THE 30-WEAPON ARSENAL ⚔️ """
     df = df.copy()
     
-    # Trend
     df['MA5'] = df['close'].rolling(5).mean()
     df['MA10'] = df['close'].rolling(10).mean()
     df['MA20'] = df['close'].rolling(20).mean()
@@ -110,11 +104,9 @@ def rekayasa_fitur(df):
     df['EMA20'] = df['close'].ewm(span=20, adjust=False).mean()
     df['EMA50'] = df['close'].ewm(span=50, adjust=False).mean()
 
-    # Volume
     df['VolMA5'] = df['volume'].rolling(5).mean()
     df['VolMA20'] = df['volume'].rolling(20).mean()
 
-    # Momentum
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -130,26 +122,21 @@ def rekayasa_fitur(df):
     high14 = df['high'].rolling(14).max()
     df['Stoch_K'] = 100 * ((df['close'] - low14) / (high14 - low14))
     
-    # Volatility (PENTING BUAT EXIT STRATEGY)
     std20 = df['close'].rolling(20).std()
     df['BB_Upper'] = df['MA20'] + (std20 * 2)
     df['BB_Lower'] = df['MA20'] - (std20 * 2)
     df['BB_Width'] = (df['BB_Upper'] - df['BB_Lower']) / df['close']
     
-    # ATR (Average True Range) - Jantungnya Exit Strategy
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
     ranges = pd.concat([high_low, high_close, low_close], axis=1)
     true_range = np.max(ranges, axis=1)
     df['ATR'] = true_range.rolling(14).mean()
-    
-    # Flow & Other
     df['OBV'] = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
     df['Returns'] = df['close'].pct_change()
     df['Target'] = np.where(df['close'].shift(-1) > df['close'], 1, 0)
-    
-    # Cleaning
+ 
     temp_check = df.dropna()
     if len(temp_check) < 10:
         heavy_indicators = ['MA200', 'EMA50', 'MA50', 'MA100', 'MACD']
@@ -159,29 +146,21 @@ def rekayasa_fitur(df):
     df.dropna(inplace=True)
     return df
 
-# --- 4. SNIPER & EXIT LOGIC ---
-
 def calculate_exit_strategy(df):
     """
     Menghitung Titik Jual (TP) dan Cut Loss (SL) berdasarkan ATR
     """
     last = df.iloc[-1]
     close_price = last['close']
-    atr = last['ATR'] if 'ATR' in df.columns else (close_price * 0.02) # Fallback 2% jika ATR error
+    atr = last['ATR'] if 'ATR' in df.columns else (close_price * 0.02)
     ma20 = last['MA20'] if 'MA20' in df.columns else (close_price * 0.95)
 
-    # 1. STOP LOSS (Pengaman)
-    # SL Moderat: 2x ATR dibawah harga
     sl_price = close_price - (2 * atr)
-    # SL Hard: Low candle kemarin (untuk momentum ketat)
     sl_candle = df.iloc[-2]['low'] if len(df) > 1 else sl_price
     
-    final_sl = max(sl_price, sl_candle) # Ambil yang paling ketat tapi masuk akal
+    final_sl = max(sl_price, sl_candle) 
 
-    # 2. TAKE PROFIT (Cuan)
-    # TP 1 (Conservative): 1.5x ATR (Risk Reward 1:1 kurang dikit)
     tp1 = close_price + (1.5 * atr)
-    # TP 2 (Aggressive): 3x ATR atau Upper BB
     tp2 = close_price + (3 * atr)
     
     return final_sl, tp1, tp2, atr
@@ -190,12 +169,10 @@ def cek_kriteria_sniper_auto(df):
     try:
         last = df.iloc[-1]; prev = df.iloc[-2]
         
-        # Liquidity Check
         value_trans = last['close'] * last['volume']
         if value_trans < 3_000_000_000: return False
         if last['close'] <= 50: return False
 
-        # BSJP Momentum Rules
         vol_ma20 = df['VolMA20'].iloc[-1] if 'VolMA20' in df.columns else last['volume']
         vol_check = last['volume'] >= 1.5 * vol_ma20
         price_gain = (last['close'] - prev['close']) / prev['close']
@@ -205,7 +182,6 @@ def cek_kriteria_sniper_auto(df):
         
         if vol_check and gain_check and trend_check: return "BSJP-Momentum"
 
-        # Reversal Rules
         if 'MA200' in df.columns:
             ma200 = df['MA200'].iloc[-1]; ma50 = df['MA50'].iloc[-1] if 'MA50' in df.columns else 0
             if (ma200 > ma20) and (ma20 >= ma50) and (price_gain > 0.02) and vol_check:
@@ -236,7 +212,6 @@ def get_sniper_details_full(ticker, df):
             icon = "🚀" if status=="pass" else ("⚠️" if status=="warn" else "❌")
             return f"<div class='{cls}'><div style='font-weight:bold; font-size:1.0rem;'>{icon} {title}</div><div style='color:#ccc; font-size:0.85rem;'>{detail}</div></div>"
 
-        # Logic Display
         if pct_change >= 0.05: report.append(make_card("pass", "Power Candle", f"+{pct_change*100:.2f}%"))
         elif pct_change >= 0.03: report.append(make_card("warn", "Moderate", f"+{pct_change*100:.2f}%"))
         else: report.append(make_card("fail", "Weak", f"+{pct_change*100:.2f}%"))
@@ -253,7 +228,6 @@ def get_sniper_details_full(ticker, df):
         return report
     except: return []
 
-# --- 5. FUNDAMENTAL ---
 def get_fundamental_score(ticker):
     try:
         stock = yf.Ticker(ticker)
@@ -273,7 +247,6 @@ def get_fundamental_score(ticker):
         return score, report
     except: return 0, ["<div style='color:red'>N/A</div>"]
 
-# --- 6. AI MODELS ---
 def train_kmeans(df):
     cols = [c for c in ['BB_Width', 'RSI', 'OBV'] if c in df.columns]
     if not cols: return df, None
@@ -283,14 +256,12 @@ def train_kmeans(df):
     df['Cluster'] = kmeans.labels_
     return df, kmeans
 
-# Simple wrappers
 def train_sklearn(model_class, X_tr, y_tr, X_last, **kwargs):
     try:
         model = model_class(**kwargs); model.fit(X_tr, y_tr)
         return model.predict_proba(X_last)[0][1] if hasattr(model, "predict_proba") else float(model.predict(X_last)[0])
     except: return 0.5
 
-# Dummy Classes for DL (to save space, functional)
 class LSTMNet(nn.Module):
     def __init__(self, i): super().__init__(); self.l=nn.LSTM(i,64,batch_first=True); self.f=nn.Linear(64,1); self.s=nn.Sigmoid()
     def forward(self, x): o,_=self.l(x); return self.s(self.f(o[:,-1,:]))
@@ -311,9 +282,8 @@ def train_dl(model_class, X_tr, y_tr, last, is_cnn=False):
         with torch.no_grad(): return model(last_t).item()
     except: return 0.5
 
-def train_rl(prices): return 0.5 # Placeholder
+def train_rl(prices): return 0.5 
 
-# --- 7. DASHBOARD ---
 st.title("🎯 Infinity Sniper: Entry & Exit Strategy")
 tickers = get_all_tickers()
 
@@ -351,7 +321,6 @@ status = cek_kriteria_sniper_auto(df_ml)
 if status: st.success(f"🔥 {target} SNIPER MODE: {status}")
 else: st.info(f"ℹ️ {target} Normal Mode")
 
-# CALCULATE EXIT STRATEGY
 sl, tp1, tp2, atr_val = calculate_exit_strategy(df_ml)
 curr_price = raw_df['close'].iloc[-1]
 
@@ -395,7 +364,7 @@ with tab1:
     for i, r in enumerate(report):
         with c_a if i < len(report)/2 else c_b: st.markdown(r, unsafe_allow_html=True)
 
-with tab2: # AI TAB (Simplified for speed)
+with tab2: 
     st.subheader("Konsensus AI (15 Model)")
     feats = ['Returns','MA10','MA50','RSI','MACD','OBV','BB_Width','Cluster']
     valid_f = [f for f in feats if f in df_ml.columns]
@@ -404,7 +373,6 @@ with tab2: # AI TAB (Simplified for speed)
     last = X_sc[[-1]]
     
     with st.spinner("AI Voting..."):
-        # Running subset of models for demo speed, full logic in prev versions
         p_xgb = train_sklearn(XGBClassifier, X_sc[:-1], y[:-1], last, n_estimators=50)
         p_rf = train_sklearn(RandomForestClassifier, X_sc[:-1], y[:-1], last, n_estimators=50)
         p_svm = train_sklearn(SVC, X_sc[:-1], y[:-1], last, probability=True)
@@ -417,7 +385,7 @@ with tab2: # AI TAB (Simplified for speed)
         
         st.markdown(f"<h1 style='text-align:center; color:{c}'>{txt} ({avg*100:.0f}%)</h1>", unsafe_allow_html=True)
 
-with tab3: # Chart
+with tab3: 
     ma = 'MA200' if 'MA200' in df_ml.columns else 'MA20'
     fig = go.Figure(data=[go.Candlestick(x=raw_df.index, open=raw_df['open'], high=raw_df['high'], low=raw_df['low'], close=raw_df['close'])])
     if ma in df_ml.columns: fig.add_trace(go.Scatter(x=raw_df.index, y=df_ml[ma], line=dict(color='orange'), name=ma))
@@ -425,7 +393,7 @@ with tab3: # Chart
     fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False)
     st.plotly_chart(fig, use_container_width=True)
 
-with tab4: # Fund
+with tab4: 
     s, r = get_fundamental_score(target)
     st.metric("Fundamental", f"{s}/6")
     for x in r: st.markdown(x, unsafe_allow_html=True)
